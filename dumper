@@ -1,21 +1,11 @@
--- ============================================================================
--- ULTRA DUMPER (Aggressive, Full Capture)
--- ============================================================================
 local UltraDumper = {}
 
--- Config
 local cfg = {
     log_file = "UltraDumper.log",
     also_print = true,
-    hook_loaders = true,
-    hook_require = true,
-    trace_calls = true,
-    trace_returns = true,
-    trace_lines = false, -- can be heavy, set true if you want line tracing
-    max_table_depth = 5, -- depth for table serialization
+    max_table_depth = 5,
 }
 
--- Save original functions
 local _ORIG = {
     print = print,
     loadstring = loadstring,
@@ -26,8 +16,6 @@ local _ORIG = {
     string_dump = string.dump,
     debug = debug,
 }
-
--- ============================================================================ Helper Functions
 
 local function safe_tostring(v)
     local ok, s = pcall(tostring, v)
@@ -45,22 +33,9 @@ local function write_log(msg)
     local line = string.format("[%s] %s", now_iso(), msg)
     if cfg.also_print then _ORIG.print(line) end
     local f = io.open(cfg.log_file, "a+")
-    if f then
-        f:write(line.."\n")
-        f:flush()
-        f:close()
-    end
+    if f then f:write(line.."\n"); f:close() end
 end
 
-local function hex_dump(s)
-    local out = {}
-    for i=1,#s do
-        out[#out+1] = string.format("%02X", string.byte(s,i))
-    end
-    return table.concat(out," ")
-end
-
--- Serialize tables safely (limited depth)
 local function serialize(value, seen, depth)
     seen = seen or {}
     depth = depth or 0
@@ -83,8 +58,6 @@ local function serialize(value, seen, depth)
     return "<"..t..">"
 end
 
--- ============================================================================ Function Dumping
-
 local function snapshot_upvalues(fn)
     local ups = {}
     local i = 1
@@ -103,20 +76,17 @@ local function dump_function(fn, label)
     write_log(("FUNCTION [%s] @ %s:%s what=%s name=%s nups=%d")
         :format(label, info.short_src or "?", info.linedefined or -1,
             info.what or "?", info.name or "?", info.nups or 0))
-    
     for _,u in ipairs(snapshot_upvalues(fn)) do
         write_log(("  upvalue[%d] %s = %s"):format(u.index,u.name,u.repr))
     end
-
     if _ORIG.getfenv then
         local ok, env = pcall(_ORIG.getfenv, fn)
         if ok then write_log("  env="..serialize(env)) end
     end
-
     if _ORIG.string_dump then
         local ok, bc = pcall(_ORIG.string_dump, fn)
         if ok and type(bc)=="string" then
-            write_log("  bytecode: "..hex_dump(bc:sub(1,64)).." ...")
+            write_log("  bytecode: <"..#bc.." bytes>")
         end
     end
 end
@@ -124,22 +94,16 @@ end
 local function wrap_callable(fn, label)
     if type(fn)~="function" then return fn end
     return function(...)
-        local args = {...}
-        write_log(("CALL %s args=%s"):format(label, serialize(args)))
         dump_function(fn, label)
-        local ok, r1,r2,r3 = pcall(fn, ...)
-        write_log(("RETURN %s ok=%s results=%s"):format(label, tostring(ok), serialize({r1,r2,r3})))
-        return (ok and r1), r2, r3
+        local ok, r1,r2,r3 = pcall(fn,...)
+        return (ok and r1), r2,r3
     end
 end
-
--- ============================================================================ Hook Loaders
 
 local function wrap_loaders()
     if _ORIG.loadstring then
         _G.loadstring = function(chunk, name)
             write_log(("loadstring intercepted: %d bytes, name=%s"):format(type(chunk)=="string" and #chunk or -1, tostring(name)))
-            if type(chunk)=="string" then write_log("chunk preview: "..chunk:sub(1,128)) end
             local fn, err = _ORIG.loadstring(chunk, name)
             if fn then return wrap_callable(fn, "loadstring:"..tostring(name or "?")) end
             return fn, err
@@ -155,61 +119,17 @@ local function wrap_loaders()
     end
 end
 
--- ============================================================================ Heap Scan
-
-local function scan_gc()
-    local funcs = {}
-    for i,v in pairs(_ORIG.debug.getregistry()) do
-        if type(v)=="function" then funcs[#funcs+1] = v end
-    end
-    for _,f in ipairs(funcs) do
-        dump_function(f)
-    end
-end
-
--- ============================================================================ Debug Hook
-
-local function start_trace()
-    local mask = ""
-    if cfg.trace_calls then mask = mask.."c" end
-    if cfg.trace_returns then mask = mask.."r" end
-    if cfg.trace_lines then mask = mask.."l" end
-    _ORIG.debug.sethook(function(event, line)
-        local info = _ORIG.debug.getinfo(2, "nSl")
-        write_log(("TRACE %s %s:%s %s"):format(event, info.short_src or "?", line, info.name or "?"))
-        if event=="call" then
-            local f = _ORIG.debug.getinfo(2,"f").func
-            if f then dump_function(f, info.name or "<call>") end
-        end
-    end, mask)
-end
-
--- ============================================================================
--- Installer
--- ============================================================================
 function UltraDumper.install()
     wrap_loaders()
-    start_trace()
-    write_log("UltraDumper INSTALLED")
+    write_log("UltraDumper INSTALLED (no hooks, executor safe)")
 end
 
--- ============================================================================
--- Run a script
--- ============================================================================
 function UltraDumper.run_script(code, name)
     UltraDumper.install()
     local fn, err = loadstring(code, name or "Injected")
-    if not fn then
-        write_log("LOADSTRING ERROR: "..tostring(err))
-        return
-    end
+    if not fn then write_log("LOADSTRING ERROR: "..tostring(err)); return end
     local ok, res = pcall(fn)
-    if not ok then
-        write_log("RUNTIME ERROR: "..tostring(res))
-    end
+    if not ok then write_log("RUNTIME ERROR: "..tostring(res)) end
 end
 
--- ============================================================================
--- EXPORT
--- ============================================================================
 return UltraDumper
